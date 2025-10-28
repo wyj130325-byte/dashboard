@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elasticsearch 聚合可视化</title>
+    <!-- 引入 Apache ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f9f9f9;
+            color: #333;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+        }
+        #jsonInput {
+            width: 100%;
+            height: 200px;
+            box-sizing: border-box;
+            border: 2px solid #ccc;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        #controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 20px;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        #chartTypeSelector {
+            font-size: 16px;
+        }
+        #chartTypeSelector label {
+            margin-right: 15px;
+            margin-left: 5px;
+            cursor: pointer;
+        }
+        #chartTypeSelector input {
+            cursor: pointer;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        /* 新增：文件上传按钮的样式 */
+        button.upload-btn {
+            background-color: #28a745;
+        }
+        button.upload-btn:hover {
+            background-color: #218838;
+        }
+        #chartsContainer {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .chart-box {
+            width: 100%;
+            height: 450px;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        #errorDisplay {
+            color: #e74c3c;
+            background-color: #fbeae5;
+            border: 1px solid #e74c3c;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            display: none; /* 默认隐藏 */
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Elasticsearch 聚合结果可视化</h1>
+    <div id="errorDisplay"></div>
+    <textarea id="jsonInput" placeholder="请在此处粘贴 Elasticsearch 返回的 JSON 结果，或点击下方按钮上传文件..."></textarea>
+    
+    <div id="controls">
+        <div id="chartTypeSelector">
+            <input type="radio" name="chartType" value="stackedBar" id="typeStackedBar" checked>
+            <label for="typeStackedBar">堆叠柱状图</label>
+            
+            <input type="radio" name="chartType" value="line" id="typeLine">
+            <label for="typeLine">折线图</label>
+        </div>
+        
+        <!-- 新增：文件上传按钮 -->
+        <input type="file" id="jsonFile" accept=".json,.txt,.log" style="display: none;">
+        <button type="button" class="upload-btn" onclick="document.getElementById('jsonFile').click();">
+            上传 JSON 文件
+        </button>
+
+        <!-- 修改：原按钮文本 -->
+        <button onclick="renderCharts()">从文本框生成图表</button>
+    </div>
+
+    <div id="chartsContainer"></div>
+
+    <script type="text/javascript">
+    
+        /**
+         * 渲染所有图表的主函数
+         */
+        function renderCharts() {
+            const inputElement = document.getElementById('jsonInput');
+            const chartsContainer = document.getElementById('chartsContainer');
+            const errorDisplay = document.getElementById('errorDisplay');
+            
+            // 0. 获取用户选择的图表类型
+            const chartType = document.querySelector('input[name="chartType"]:checked').value;
+
+            // 1. 清理和解析 JSON
+            let rawData = inputElement.value;
+            let data;
+            let aggs; // <-- 在这里声明 aggs
+
+            try {
+                // 尝试从文本中提取 JSON，处理额外的字符和换行
+                const jsonMatch = rawData.match(/{[\s\S]*}/);
+                if (!jsonMatch) {
+                    throw new Error("未找到有效的 JSON 对象。");
+                }
+                data = JSON.parse(jsonMatch[0]);
+                
+                // --- 修改开始: 兼容没有 aggregations 顶层键的情况 ---
+                if (data.aggregations) {
+                    // 1. 标准情况: "aggregations" 键存在
+                    aggs = data.aggregations;
+                } else if (data.by_create_day || data.by_publish_day) {
+                    // 2. 兼容情况: 用户直接粘贴了 aggregations 内部的对象
+                    aggs = data;
+                } else {
+                    // 3. 错误情况: 找不到聚合数据
+                    throw new Error("JSON 数据中未找到 'aggregations' 或 'by_create_day'/'by_publish_day' 字段。");
+                }
+                // --- 修改结束 ---
+                
+                // 清理旧图表和错误信息
+                chartsContainer.innerHTML = '';
+                errorDisplay.style.display = 'none';
+
+            } catch (e) {
+                console.error("JSON 解析失败:", e);
+                errorDisplay.innerText = `JSON 解析失败: ${e.message} \n请检查您粘贴的内容是否正确。`;
+                errorDisplay.style.display = 'block';
+                chartsContainer.innerHTML = ''; // 解析失败时也清空图表
+                return;
+            }
+
+            // const aggs = data.aggregations; // <-- 这行已被上面的逻辑替换
+
+            // 2. 渲染 'by_create_day' (入库量) 相关图表
+            if (aggs.by_create_day && aggs.by_create_day.buckets.length > 0) {
+                const createBuckets = aggs.by_create_day.buckets;
+                const platformExtractor = (b) => b.by_platform.buckets;
+
+                // --- 修改开始: 调整图表顺序和标题 ---
+
+                // 2.1 当天发文当天入库量 (same_day_ingest.doc_count)
+                createChart(
+                    '当天发文当天入库的数据总量分布 (按平台)',
+                    createBuckets,
+                    platformExtractor,
+                    (b) => b.same_day_ingest.doc_count,
+                    chartType
+                );
+
+                // 2.2 每日总入库量 (doc_count)
+                createChart(
+                    '当天入库(含历史数据)的总量分布 (按平台)',
+                    createBuckets,
+                    platformExtractor,
+                    (b) => b.doc_count,
+                    chartType
+                );
+
+                // 2.3 历史数据入库量 (historical_ingest.doc_count)
+                createChart(
+                    '差值(历史数据)分布 (按平台)',
+                    createBuckets,
+                    platformExtractor,
+                    (b) => b.historical_ingest.doc_count,
+                    chartType
+                );
+                // --- 修改结束 ---
+            }
+
+            // 3. 动态渲染 'by_publish_day' (发文量指标) 相关图表
+            if (aggs.by_publish_day && aggs.by_publish_day.buckets.length > 0) {
+                const publishBuckets = aggs.by_publish_day.buckets;
+                const platformExtractor = (b) => b.by_platform.buckets;
+
+                // --- 新增开始: 显式创建 'by_publish_day' 的总发文量图表 ---
+                createChart(
+                    '当天所有发文作品量分布 (按发文日期) (按平台)',
+                    publishBuckets,
+                    platformExtractor,
+                    (b) => b.doc_count,
+                    chartType
+                );
+                // --- 新增结束 ---
+
+
+                // 动态检测指标 (ts_topic, etc.)
+                const firstPlatformBucket = publishBuckets[0]?.by_platform?.buckets[0];
+                if (firstPlatformBucket) {
+                    // 查找所有作为子聚合的 key (排除 'key' 和 'doc_count')
+                    const metrics = Object.keys(firstPlatformBucket).filter(
+                        k => k !== 'key' && k !== 'doc_count' && 
+                             typeof firstPlatformBucket[k] === 'object' && 
+                             firstPlatformBucket[k].doc_count !== undefined
+                    );
+
+                    // 为检测到的每个指标动态创建图表
+                    for (const metric of metrics) {
+                        const title = `每日 ${metric} 量分布 (按发文日期) (按平台)`;
+                        createChart(
+                            title,
+                            publishBuckets,
+                            platformExtractor,
+                            (b) => b[metric].doc_count, // 动态取值
+                            chartType
+                        );
+                    }
+                }
+            }
+        }
+
+        /**
+         * 创建一个图表 (柱状图或折线图)
+         * @param {string} title - 图表标题
+         * @param {Array} dateBuckets - ES返回的按日期聚合的 buckets 数组
+         * @param {Function} platformExtractor - (dateBucket) => platformBuckets 提取平台 buckets 的函数
+         * @param {Function} valueExtractor - (platformBucket) => value 提取具体数值的函数
+         * @param {string} chartType - 'stackedBar' 或 'line'
+         */
+        function createChart(title, dateBuckets, platformExtractor, valueExtractor, chartType) {
+            const chartsContainer = document.getElementById('chartsContainer');
+            
+            // 1. 创建图表 DOM 容器
+            const chartDiv = document.createElement('div');
+            chartDiv.className = 'chart-box';
+            chartsContainer.appendChild(chartDiv);
+            
+            const myChart = echarts.init(chartDiv);
+
+            // 2. 准备 ECharts 数据
+            const dates = dateBuckets.map(b => b.key_as_string);
+            const platforms = new Set();
+            
+            // 临时数据结构，方便转换
+            const dataMap = new Map(); // Map<date, Map<platform, value>>
+
+            for (const dateBucket of dateBuckets) {
+                const date = dateBucket.key_as_string;
+                const platformBuckets = platformExtractor(dateBucket);
+                const platformValueMap = new Map();
+
+                if (platformBuckets) { // 增加一个检查，以防 'by_platform' 为空
+                    for (const platformBucket of platformBuckets) {
+                        const platform = platformBucket.key;
+                        const value = valueExtractor(platformBucket) || 0;
+                        platforms.add(platform);
+                        platformValueMap.set(platform, value);
+                    }
+                }
+                dataMap.set(date, platformValueMap);
+            }
+
+            const platformList = Array.from(platforms).sort();
+
+            // 3. 构建 ECharts series
+            const series = platformList.map(platform => {
+                const data = dates.map(date => {
+                    return dataMap.get(date)?.get(platform) || 0;
+                });
+                
+                // 根据 chartType 动态配置 series
+                let seriesConfig = {
+                    name: platform,
+                    data: data,
+                    emphasis: {
+                        focus: 'series'
+                    }
+                };
+
+                if (chartType === 'stackedBar') {
+                    seriesConfig.type = 'bar';
+                    seriesConfig.stack = 'total'; // 设置堆叠
+                } else { // 'line'
+                    seriesConfig.type = 'line';
+                    seriesConfig.smooth = true; // 让折线图平滑
+                }
+                
+                return seriesConfig;
+            });
+
+            // 4. ECharts 配置
+            const option = {
+                title: {
+                    text: title,
+                    left: 'center',
+                    textStyle: {
+                        fontSize: 18,
+                        fontWeight: 'normal'
+                    }
+                },
+                tooltip: {
+                    trigger: 'axis', // 坐标轴触发，适用于柱状图和折线图
+                    axisPointer: {
+                        type: (chartType === 'stackedBar') ? 'shadow' : 'cross' // 柱状图用阴影，折线图用十字
+                    }
+                },
+                legend: {
+                    data: platformList,
+                    top: 30,
+                    type: 'scroll' // 平台过多时可以滚动
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '3%',
+                    top: 70, // 为图例留出空间
+                    containLabel: true
+                },
+                xAxis: [
+                    {
+                        type: 'category',
+                        data: dates,
+                        axisTick: {
+                            alignWithLabel: true
+                        }
+                    }
+                ],
+                yAxis: [
+                    {
+                        type: 'value' // ECharts 会自动计算步长 (interval)
+                    }
+                ],
+                dataZoom: [ // 增加缩放条，方便查看长时序数据
+                    {
+                        type: 'slider',
+                        start: 0,
+                        end: 100,
+                        bottom: 10
+                    }
+                ],
+                series: series
+            };
+
+            myChart.setOption(option);
+            
+            // 监听窗口大小变化，使图表自适应
+            window.addEventListener('resize', () => {
+                myChart.resize();
+            });
+        }
+
+        // --- 新增：文件上传处理逻辑 ---
+        document.getElementById('jsonFile').addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (!file) {
+                return; // 用户取消了选择
+            }
+
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                const fileContent = e.target.result;
+                // 将文件内容放入文本框
+                document.getElementById('jsonInput').value = fileContent;
+                
+                // 自动触发图表生成
+                renderCharts();
+            };
+            
+            reader.onerror = function() {
+                const errorDisplay = document.getElementById('errorDisplay');
+                errorDisplay.innerText = `文件读取失败: ${reader.error}`;
+                errorDisplay.style.display = 'block';
+            };
+            
+            // 以文本形式读取文件
+            reader.readAsText(file);
+            
+            // 重置文件输入框，以便用户可以再次上传同一个文件
+            event.target.value = null;
+        });
+
+    </script>
+</body>
+</html>
+
+
